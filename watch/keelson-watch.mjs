@@ -3,15 +3,19 @@
 // hand, becomes visible to every other agent: it watches the repository folder and git, reports which functions
 // change as they change, and prints Keelson's answers in the terminal. It cannot stop another program's edit.
 //
-//   keelson-watch [folder] [--agent Aider] [--sync]   watch a repository with a .keelson file (default: here)
+//   keelson-watch [folder] [--agent Aider] [--sync] [--quiet]   watch a repository with a .keelson file (default: here)
+//   keelson-watch start [folder] [...]   the same in the background (log in ~/.keelson/watch/); stop [folder] ends it
+//   keelson-watch status [folder]        who is working in this project right now, and on what
 //   keelson-watch login --key kel_live_... [--url https://api.shipkeelson.com] [--developer login]
 //   keelson-watch install codex|cursor|gemini         add Keelson's hooks to that agent for this user
 //
 // --sync merges main into the branch when Keelson says code being edited moved on main, only when the working tree
-// is clean (otherwise it says what to run). Settings: ~/.keelson/config.json (login), or KEELSON_API_KEY / KEELSON_URL.
+// is clean (otherwise it says what to run). Answers that matter (wait, sync, messages) also show as a desktop
+// notification unless --quiet. Settings: ~/.keelson/config.json (login), or KEELSON_API_KEY / KEELSON_URL.
 
-import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,9 +28,38 @@ const GIT_CHECK_MS = 3_000;
 const SETTLE_MS = 300;
 const SKIP = /(^|\/)(\.git|node_modules|dist|build|\.venv|venv|__pycache__|\.next|target|coverage)(\/|$)/;
 
+// A desktop notification, best effort and never blocking: macOS (osascript), Linux (notify-send), Windows (a
+// notification-area balloon through PowerShell). The text travels in an environment variable, never in a command line.
+export function notify(text, { platform = process.platform, run = spawn } = {}) {
+  if (process.env.KEELSON_NOTIFY === "0") return false;
+  const body = String(text).replace(/`/g, "").slice(0, 240);
+  const env = { ...process.env, KEELSON_NOTE: body };
+  const commands = {
+    darwin: ["osascript", ["-e", 'display notification (system attribute "KEELSON_NOTE") with title "Keelson"']],
+    linux: ["notify-send", ["Keelson", body]],
+    win32: ["powershell", ["-NoProfile", "-WindowStyle", "Hidden", "-Command",
+      "Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; " +
+      "$n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; " +
+      "$n.ShowBalloonTip(8000, 'Keelson', $env:KEELSON_NOTE, 'Info'); Start-Sleep -Seconds 9; $n.Dispose()"]],
+  };
+  const command = commands[platform];
+  if (!command) return false;
+  try {
+    run(command[0], command[1], { env, detached: true, stdio: "ignore", windowsHide: true }).unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function say(kind, text) {
   const colour = { wait: 33, deny: 31, sync_main: 36, info: 90, message: 35 }[kind] || 0;
   process.stderr.write(`\x1b[${colour}m[keelson] ${text}\x1b[0m\n`);
+}
+
+function sayAndNotify(kind, text) {
+  say(kind, text);
+  if (kind !== "info") notify(text);
 }
 
 function arg(argv, name) {
@@ -312,11 +345,81 @@ export class Watcher {
   }
 }
 
+// ---- status, and running in the background ------------------------------------------------------------------
+
+export async function status(argv, { config = settings(process.env, "other"), print = (line) => process.stdout.write(`${line}\n`) } = {}) {
+  const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
+  const project = findProject(folder);
+  if (!project) throw new Error(`no .keelson file in ${folder} or above`);
+  if (!config.apiKey) throw new Error("not logged in: run keelson-watch login --key kel_live_...");
+  const response = await fetch(`${config.url}/v1/protocol/projects/${project.project}/live`, { headers: { authorization: `Bearer ${config.apiKey}` } });
+  if (response.status === 503) return print("The live view needs Keelson's project coordinators, which are not running for this project.");
+  if (!response.ok) throw new Error(`Keelson answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  const live = await response.json();
+  for (const [repo, state] of Object.entries(live.repos || {})) {
+    print(`${repo}: ${state.agents} agent${state.agents === 1 ? "" : "s"}, ${state.claims} function${state.claims === 1 ? "" : "s"} held, ${state.waiting} waiting`);
+    for (const a of state.shown || []) {
+      const editing = (a.editing || []).map((e) => e.replace(/`/g, "")).slice(0, 3).join(", ");
+      print(`  ${a.agent}${a.owner ? ` (${a.owner})` : ""} on ${a.branch}${editing ? `: editing ${editing}` : ""}${a.waiting_for ? `, waiting for ${a.waiting_for}` : ""}`);
+    }
+  }
+  if (!Object.keys(live.repos || {}).length) print("No agents working in this project right now.");
+  return live;
+}
+
+function pidFile(folder) {
+  const root = findProject(folder)?.root;
+  if (!root) throw new Error(`no .keelson file in ${folder} or above`);
+  const id = createHash("sha256").update(root).digest("hex").slice(0, 12);
+  const dir = join(home(), "watch");
+  mkdirSync(dir, { recursive: true });
+  return { pid: join(dir, `${id}.pid`), log: join(dir, `${id}.log`), root };
+}
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function start(argv) {
+  const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
+  const files = pidFile(folder);
+  const running = existsSync(files.pid) ? Number(readFileSync(files.pid, "utf8")) : 0;
+  if (running && alive(running)) return say("info", `Already watching ${files.root} (process ${running}); log: ${files.log}`);
+  const out = openSync(files.log, "a");
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), files.root, ...argv.filter((a) => a !== argv[0] || a.startsWith("--"))],
+    { detached: true, stdio: ["ignore", out, out], windowsHide: true, env: { ...process.env, FORCE_COLOR: "0" } });
+  child.unref();
+  writeFileSync(files.pid, String(child.pid));
+  say("info", `Watching ${files.root} in the background (process ${child.pid}). Log: ${files.log}. Stop: keelson-watch stop`);
+}
+
+export function stop(argv) {
+  const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
+  const files = pidFile(folder);
+  const running = existsSync(files.pid) ? Number(readFileSync(files.pid, "utf8")) : 0;
+  if (!running || !alive(running)) {
+    rmSync(files.pid, { force: true });
+    return say("info", `Not watching ${files.root}.`);
+  }
+  process.kill(running, "SIGTERM");
+  rmSync(files.pid, { force: true });
+  say("info", `Stopped watching ${files.root}.`);
+}
+
 export async function cli(argv = process.argv.slice(2)) {
   if (argv[0] === "login") return login(argv.slice(1));
   if (argv[0] === "install") return install(argv.slice(1));
+  if (argv[0] === "status") return status(argv.slice(1));
+  if (argv[0] === "start") return start(argv.slice(1));
+  if (argv[0] === "stop") return stop(argv.slice(1));
   const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
-  await new Watcher(folder, { agent: arg(argv, "--agent") || "Keelson Watch", sync: argv.includes("--sync") }).run();
+  const out = argv.includes("--quiet") ? say : sayAndNotify;
+  await new Watcher(folder, { agent: arg(argv, "--agent") || "Keelson Watch", sync: argv.includes("--sync"), out }).run();
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

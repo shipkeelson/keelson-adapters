@@ -5,8 +5,15 @@ heard of), or a person coding by hand, becomes visible to every other agent on t
 
 ```sh
 npx keelson-watch login --key kel_live_... [--developer your-github-login]
-npx keelson-watch [folder] [--agent Aider] [--sync]
+npx keelson-watch [folder] [--agent Aider] [--sync] [--quiet]   # in this terminal
+npx keelson-watch start [folder]                                # in the background (log in ~/.keelson/watch/)
+npx keelson-watch stop [folder]
+npx keelson-watch status [folder]                               # who is working in this project, on what
 ```
+
+Answers that matter (another agent has the function you just edited, main changed it, the code you waited for is
+free) are printed and also shown as a desktop notification (macOS, Linux with `notify-send`, Windows); `--quiet` or
+`KEELSON_NOTIFY=0` turns notifications off.
 
 It watches the repository folder (files git ignores are skipped) and git itself:
 

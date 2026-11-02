@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Watcher, install, login } from "../keelson-watch.mjs";
+import { Watcher, install, login, notify, start, status, stop } from "../keelson-watch.mjs";
 
 const PROJECT = "kp_shop0000project";
 const CART = "export function applyDiscount(total) {\n  return total\n}\n\nexport function count() {\n  return 1\n}\n";
@@ -89,4 +89,47 @@ test("login saves the key; install adds Keelson's hooks to Cursor, Gemini CLI an
   install(["codex"]);
   const codex = JSON.parse(readFileSync(join(home, ".codex", "hooks.json"), "utf8"));
   assert.match(codex.hooks.PreToolUse[0].hooks[0].command, /\.keelson\/adapters\/codex\/keelson\.mjs" pre-edit codex$/);
+});
+
+test("notifications use each platform's own tool and carry the text outside the command line", () => {
+  const calls = [];
+  const run = (cmd, args, opts) => { calls.push([cmd, args, opts.env.KEELSON_NOTE]); return { unref() {} }; };
+  for (const platform of ["darwin", "linux", "win32"]) assert.equal(notify("`cart.ts`: Claude Code (sam) is editing it", { platform, run }), true);
+  assert.deepEqual(calls.map((c) => c[0]), ["osascript", "notify-send", "powershell"]);
+  assert.ok(calls.every((c) => c[2] === "cart.ts: Claude Code (sam) is editing it") && !calls[0][1].join(" ").includes("sam"));
+  assert.equal(notify("x", { platform: "aix", run }), false);
+});
+
+test("status prints who is working in the project and on what", async () => {
+  const { dir } = repo();
+  const server = createServer((req, res) => {
+    assert.equal(req.url, `/v1/protocol/projects/${PROJECT}/live`);
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ repos: { "acme/api": { agents: 1, claims: 1, waiting: 0, shown: [
+      { agent: "Claude Code", owner: "sam", branch: "sam/discount", editing: ["`applyDiscount` in `cart.js`"], waiting_for: null }] } } }));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const lines = [];
+  await status([dir], { config: { apiKey: "k", url: `http://127.0.0.1:${server.address().port}` }, print: (l) => lines.push(l) });
+  server.closeAllConnections();
+  server.close();
+  assert.deepEqual(lines, ["acme/api: 1 agent, 1 function held, 0 waiting", "  Claude Code (sam) on sam/discount: editing applyDiscount in cart.js"]);
+});
+
+test("start runs the watcher in the background and stop ends it", async () => {
+  const { dir } = repo();
+  const api = await keelson(() => ({}));
+  const home = mkdtempSync(join(tmpdir(), "keelson-home-"));
+  Object.assign(process.env, { KEELSON_HOME: home, KEELSON_API_KEY: "k", KEELSON_URL: api.url, KEELSON_NOTIFY: "0" });
+  start([dir]);
+  const pidFile = (await import("node:fs")).readdirSync(join(home, "watch")).find((f) => f.endsWith(".pid"));
+  const pid = Number(readFileSync(join(home, "watch", pidFile), "utf8"));
+  for (let i = 0; i < 50 && !api.seen.some((e) => e.type === "session.start"); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.ok(api.seen.some((e) => e.type === "session.start" && e.session.vendor === "other"));
+  stop([dir]);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.throws(() => process.kill(pid, 0));
+  api.close();
+  delete process.env.KEELSON_API_KEY;
+  delete process.env.KEELSON_URL;
 });
