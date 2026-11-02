@@ -1,0 +1,21 @@
+{
+  "description": "Keelson: report this session's work and bring other agents' work into Claude's context.",
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume|clear", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/keelson.mjs", "session-start"], "timeout": 10 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/keelson.mjs", "prompt"], "timeout": 5 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Edit|MultiEdit|Write|NotebookEdit", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/keelson.mjs", "pre-edit"], "timeout": 5 }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit|MultiEdit|Write|NotebookEdit", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/keelson.mjs", "post-edit"], "timeout": 10, "async": true }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/keelson.mjs", "post-bash"], "timeout": 10, "async": true }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/keelson.mjs", "session-end"], "timeout": 10 }] }
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "keelson",
+  "version": "0.1.0",
+  "description": "Coordinate Codex with every other coding agent on your repositories: no duplicated work, no editing code another agent has, no building on stale code.",
+  "author": {
+    "name": "ShipKeelson",
+    "url": "https://shipkeelson.com"
+  },
+  "homepage": "https://shipkeelson.com/gate",
+  "repository": "https://github.com/shipkeelson/keelson-adapters",
+  "keywords": [
+    "coordination",
+    "agents",
+    "merge conflicts",
+    "multi-agent"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Keelson",
+    "shortDescription": "Coordinate Codex with every other coding agent",
+    "longDescription": "Tells Codex when another agent (Claude Code, Cursor, another Codex) already has the code it is about to edit, when that code changed on main, or when someone is already doing its task. Sends file paths, function names and task text; never code.",
+    "developerName": "ShipKeelson",
+    "category": "Developer Tools",
+    "websiteURL": "https://shipkeelson.com/gate"
+  }
+}

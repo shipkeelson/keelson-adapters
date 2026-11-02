@@ -1,0 +1,15 @@
+{
+  "name": "keelson",
+  "description": "Keelson: one coordination layer for every coding agent.",
+  "owner": {
+    "name": "ShipKeelson",
+    "url": "https://shipkeelson.com"
+  },
+  "plugins": [
+    {
+      "name": "keelson",
+      "source": "./claude-code",
+      "description": "Coordinate Claude Code with every other coding agent on your repositories."
+    }
+  ]
+}

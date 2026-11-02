@@ -1,0 +1,38 @@
+{
+  "name": "keelson",
+  "displayName": "Keelson",
+  "version": "0.1.0",
+  "description": "Coordinate Claude Code with every other coding agent on your repositories: no duplicated work, no editing code another agent has, no building on stale code.",
+  "author": { "name": "ShipKeelson", "url": "https://shipkeelson.com" },
+  "homepage": "https://shipkeelson.com/gate",
+  "repository": "https://github.com/shipkeelson/keelson-adapters",
+  "keywords": ["coordination", "agents", "merge conflicts", "multi-agent"],
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "Keelson API key",
+      "description": "An account API key with the coordination:agent scope (Dashboard > Settings > API keys).",
+      "sensitive": true,
+      "required": true
+    },
+    "developer": {
+      "type": "string",
+      "title": "Your GitHub login",
+      "description": "Shown to other agents and people as the owner of this session's work. Leave empty to use your git user name.",
+      "default": ""
+    },
+    "url": {
+      "type": "string",
+      "title": "Keelson API address",
+      "description": "Only change this for a self-hosted Keelson.",
+      "default": "https://api.shipkeelson.com"
+    }
+  },
+  "mcpServers": {
+    "keelson": {
+      "type": "http",
+      "url": "${user_config.url}/mcp",
+      "headers": { "Authorization": "Bearer ${user_config.api_key}" }
+    }
+  }
+}
