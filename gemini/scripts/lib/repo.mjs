@@ -59,7 +59,8 @@ export function gitRoot(cwd) {
 // knows it (the .keelson file names it, or a remote matched a project); else origin's.
 export function describe(root, repo = null) {
   repo = repo || repoName(git(root, "remote", "get-url", "origin"));
-  const branch = git(root, "rev-parse", "--abbrev-ref", "HEAD");
+  let branch = git(root, "rev-parse", "--abbrev-ref", "HEAD");
+  if (branch === "HEAD") branch = rebasing(root) || branch;            // in the middle of a rebase: the branch being rebased
   const head = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") || "origin/main";
   const base = git(root, "merge-base", "HEAD", head) || null;
   return { repo, branch: branch && branch !== "HEAD" ? branch : null, base, main: head };
@@ -68,12 +69,37 @@ export function describe(root, repo = null) {
 // What HEAD points at, read from .git without starting git (about 50 ms a process on Windows): the branch's ref
 // and its commit. Changes whenever the branch is switched or moves; null when it cannot be read (worktrees,
 // packed refs), and callers then ask git.
+// The folder holding this checkout's HEAD: `.git`, or for a worktree the folder its `.git` file points at.
+function gitDir(root) {
+  const dot = join(root, ".git");
+  try {
+    const pointer = /^gitdir: (.+)$/m.exec(readFileSync(dot, "utf8"));
+    return pointer ? resolve(root, pointer[1].trim()) : dot;
+  } catch {
+    return dot;                                                       // a folder (EISDIR): the usual case
+  }
+}
+
+function rebasing(root) {
+  for (const state of ["rebase-merge", "rebase-apply"]) {
+    try {
+      const name = readFileSync(join(gitDir(root), state, "head-name"), "utf8").trim();
+      if (name.startsWith("refs/heads/")) return name.slice("refs/heads/".length);
+    } catch {
+      // not this kind of rebase
+    }
+  }
+  return null;
+}
+
 export function headStamp(root) {
   try {
-    const head = readFileSync(join(root, ".git", "HEAD"), "utf8").trim();
+    const dir = gitDir(root);
+    const head = readFileSync(join(dir, "HEAD"), "utf8").trim();
     const ref = /^ref: (refs\/heads\/.+)$/.exec(head);
     if (!ref) return null;
-    return `${head}@${readFileSync(join(root, ".git", ...ref[1].split("/")), "utf8").trim()}`;
+    const common = existsSync(join(dir, "commondir")) ? resolve(dir, readFileSync(join(dir, "commondir"), "utf8").trim()) : dir;
+    return `${head}@${readFileSync(join(common, ...ref[1].split("/")), "utf8").trim()}`;
   } catch {
     return null;
   }

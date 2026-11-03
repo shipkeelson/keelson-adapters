@@ -127,10 +127,20 @@ test("start runs the watcher in the background and stop ends it", async () => {
   const pid = Number(readFileSync(join(home, "watch", pidFile), "utf8"));
   for (let i = 0; i < 50 && !api.seen.some((e) => e.type === "session.start"); i++) await new Promise((r) => setTimeout(r, 100));
   assert.ok(api.seen.some((e) => e.type === "session.start" && e.session.vendor === "other"));
-  stop([dir]);
-  await new Promise((r) => setTimeout(r, 300));
+  await stop([dir]);
   assert.throws(() => process.kill(pid, 0));
+  assert.ok(api.seen.some((e) => e.type === "session.end"));            // ended its session first, on every platform
   api.close();
   delete process.env.KEELSON_API_KEY;
   delete process.env.KEELSON_URL;
+});
+
+test("install never replaces an agent config it cannot read", () => {
+  const home = mkdtempSync(join(tmpdir(), "keelson-home-"));
+  Object.assign(process.env, { KEELSON_HOME: join(home, ".keelson"), HOME: home, USERPROFILE: home });
+  const { mkdirSync } = process.getBuiltinModule("node:fs");
+  mkdirSync(join(home, ".cursor"), { recursive: true });
+  writeFileSync(join(home, ".cursor", "hooks.json"), "{ not json");
+  assert.throws(() => install(["cursor"]), /not valid JSON/);
+  assert.equal(readFileSync(join(home, ".cursor", "hooks.json"), "utf8"), "{ not json");
 });

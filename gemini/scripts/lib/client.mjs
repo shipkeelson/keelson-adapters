@@ -2,7 +2,8 @@
 // on (Keelson fails open, and the merge gate still checks). Events that could not be sent are kept and sent, in
 // order, with the next request.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
@@ -103,10 +104,17 @@ function takeQueue(config) {
   }
 }
 
+const QUEUE_MAX_BYTES = 512 * 1024;
+
 function keep(config, events) {
   try {
     mkdirSync(config.dataDir, { recursive: true });
-    appendFileSync(queueFile(config), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    const file = queueFile(config);
+    appendFileSync(file, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    if (statSync(file).size > QUEUE_MAX_BYTES) {               // offline for long: keep the newest events only
+      const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-QUEUE_LIMIT);
+      writeFileSync(file, lines.join("\n") + "\n");
+    }
   } catch {
     // nowhere to keep it: the event is lost, and GitHub still shows the work
   }
@@ -126,7 +134,9 @@ export async function projectsList(config, { fetchImpl = globalThis.fetch, timeo
   } catch {
     kept = null;
   }
-  if (kept && kept.url === config.url && now - kept.at < PROJECTS_TTL_MS) return kept.projects;
+  const owner = createHash("sha256").update(`${config.url}|${config.apiKey}`).digest("hex").slice(0, 16);   // never the key itself
+  if (kept && kept.owner !== owner) kept = null;
+  if (kept && now - kept.at < PROJECTS_TTL_MS) return kept.projects;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -136,7 +146,7 @@ export async function projectsList(config, { fetchImpl = globalThis.fetch, timeo
     if (!Array.isArray(projects)) return kept ? kept.projects : null;
     if (file) {
       mkdirSync(config.dataDir, { recursive: true });
-      writeFileSync(file, JSON.stringify({ url: config.url, at: now, projects }));
+      writeFileSync(file, JSON.stringify({ owner, at: now, projects }));
     }
     return projects;
   } catch {

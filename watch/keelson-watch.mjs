@@ -90,10 +90,12 @@ export function login(argv) {
 
 function merge(file, add) {
   let current = {};
-  try {
-    current = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    current = {};
+  if (existsSync(file)) {
+    try {
+      current = JSON.parse(readFileSync(file, "utf8") || "{}");
+    } catch {
+      throw new Error(`${file} is not valid JSON, so Keelson left it as it is: fix it (or move it aside), then run this again`);
+    }
   }
   const merged = add(current);
   mkdirSync(dirname(file), { recursive: true });
@@ -344,10 +346,16 @@ export class Watcher {
       clearTimeout(this.timers.get(path));
       this.timers.set(path, setTimeout(() => { this.timers.delete(path); this.changed(path).catch(() => {}); }, SETTLE_MS));
     });
-    const gitTimer = setInterval(() => this.checkGit().catch(() => {}), GIT_CHECK_MS);
+    const gitTimer = setInterval(() => {
+      if (this.stopFile && existsSync(this.stopFile)) return end();
+      this.checkGit().catch(() => {});
+    }, GIT_CHECK_MS);
     const beat = setInterval(() => this.heartbeat().catch(() => {}), HEARTBEAT_MS);
     this.stream(stop.signal).catch(() => {});
+    let ending = false;
     const end = async () => {
+      if (ending) return;
+      ending = true;
       watcher.close();
       clearInterval(gitTimer);
       clearInterval(beat);
@@ -388,7 +396,7 @@ function pidFile(folder) {
   const id = createHash("sha256").update(root).digest("hex").slice(0, 12);
   const dir = join(home(), "watch");
   mkdirSync(dir, { recursive: true });
-  return { pid: join(dir, `${id}.pid`), log: join(dir, `${id}.log`), root };
+  return { pid: join(dir, `${id}.pid`), log: join(dir, `${id}.log`), stop: join(dir, `${id}.stop`), root };
 }
 
 function alive(pid) {
@@ -406,14 +414,15 @@ export function start(argv) {
   const running = existsSync(files.pid) ? Number(readFileSync(files.pid, "utf8")) : 0;
   if (running && alive(running)) return say("info", `Already watching ${files.root} (process ${running}); log: ${files.log}`);
   const out = openSync(files.log, "a");
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), files.root, ...argv.filter((a) => a !== argv[0] || a.startsWith("--"))],
+  rmSync(files.stop, { force: true });
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), files.root, "--stop-file", files.stop, ...argv.filter((a) => a !== argv[0] || a.startsWith("--"))],
     { detached: true, stdio: ["ignore", out, out], windowsHide: true, env: { ...process.env, FORCE_COLOR: "0" } });
   child.unref();
   writeFileSync(files.pid, String(child.pid));
   say("info", `Watching ${files.root} in the background (process ${child.pid}). Log: ${files.log}. Stop: keelson-watch stop`);
 }
 
-export function stop(argv) {
+export async function stop(argv) {
   const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
   const files = pidFile(folder);
   const running = existsSync(files.pid) ? Number(readFileSync(files.pid, "utf8")) : 0;
@@ -421,8 +430,12 @@ export function stop(argv) {
     rmSync(files.pid, { force: true });
     return say("info", `Not watching ${files.root}.`);
   }
-  process.kill(running, "SIGTERM");
+  writeFileSync(files.stop, String(Date.now()));                    // the watcher sees it within seconds and ends its session
+  const deadline = Date.now() + 8000;
+  while (alive(running) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+  if (alive(running)) process.kill(running, "SIGTERM");             // not answering: end it (its claims lapse in 10 minutes)
   rmSync(files.pid, { force: true });
+  rmSync(files.stop, { force: true });
   say("info", `Stopped watching ${files.root}.`);
 }
 
@@ -435,8 +448,10 @@ export async function cli(argv = process.argv.slice(2)) {
   const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
   const out = argv.includes("--quiet") ? say : sayAndNotify;
   const config = settings(process.env, "other");
-  await new Watcher(folder, { agent: arg(argv, "--agent") || "Keelson Watch", sync: argv.includes("--sync"), out, config,
-                              project: await locateFolder(folder, config) }).run();
+  const watcher = new Watcher(folder, { agent: arg(argv, "--agent") || "Keelson Watch", sync: argv.includes("--sync"), out, config,
+                                        project: await locateFolder(folder, config) });
+  watcher.stopFile = arg(argv, "--stop-file") || null;
+  await watcher.run();
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

@@ -164,3 +164,23 @@ test("a .keelson file that names its repository wins over the remotes", async (t
                            tool_input: { file_path: join(dir, "cart.js"), old_string: "return 1", new_string: "return 2" } }, config(dir), api.fetchImpl);
   assert.equal(api.seen.at(-1).events[0].repo, "acme/api");
 });
+
+test("mid-rebase the branch being rebased is reported; a worktree's HEAD is read from its own folder", async (t) => {
+  const { describe, headStamp } = await import("../lib/repo.mjs");
+  const dir = repo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const run = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  run("checkout", "-q", "-b", "other");
+  writeFileSync(join(dir, "cart.js"), CART.replace("return 1", "return 9"));
+  run("commit", "-qam", "other");
+  run("checkout", "-q", "sam/discount");
+  writeFileSync(join(dir, "cart.js"), CART.replace("return 1", "return 7"));
+  run("commit", "-qam", "mine");
+  try { run("rebase", "other"); } catch { /* the conflict leaves the rebase in progress */ }
+  assert.equal(describe(dir).branch, "sam/discount");
+  run("rebase", "--abort");
+  const tree = `${dir}-wt`;
+  run("worktree", "add", "-q", "-b", "wt-branch", tree);
+  t.after(() => rmSync(tree, { recursive: true, force: true }));
+  assert.match(headStamp(tree), /^ref: refs\/heads\/wt-branch@[0-9a-f]{40}$/);
+});
