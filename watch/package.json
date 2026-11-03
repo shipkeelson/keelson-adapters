@@ -1,6 +1,6 @@
 {
   "name": "keelson-watch",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Keelson's Watcher: makes any coding agent, or a person coding by hand, visible to every other agent on the repository; installs Keelson's hooks into Codex, Cursor and Gemini CLI.",
   "type": "module",
   "bin": { "keelson-watch": "keelson-watch.mjs" },
