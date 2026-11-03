@@ -25,9 +25,10 @@ function repo({ keelson = { project: PROJECT, version: 1 } } = {}) {
 }
 
 // A stand-in for the Keelson API: records each request and answers with `decide(event)`.
-function server(decide) {
+function server(decide, projects = []) {
   const seen = [];
   const fetchImpl = async (url, init) => {
+    if (url.endsWith("/v1/protocol/projects")) return new Response(JSON.stringify(projects), { status: 200 });
     const body = JSON.parse(init.body);
     seen.push({ url, auth: init.headers.authorization, events: body.events });
     return new Response(JSON.stringify({ answers: body.events.map((e) => ({ seq: e.seq, type: e.type, ...decide(e) })) }), { status: 200 });
@@ -58,6 +59,8 @@ test("repository names come from GitHub remotes", () => {
   assert.equal(repoName("https://github.com/acme/api.git"), "acme/api");
   assert.equal(repoName("git@github.com:acme/api.git"), "acme/api");
   assert.equal(repoName("https://gitlab.com/acme/api.git"), null);
+  assert.equal(repoName("ssh://git@github.com:22/acme/api.git"), "acme/api");
+  assert.equal(repoName("https://token@github.com/Acme/API"), "Acme/API");
 });
 
 test("a session starts with a briefing and sends one protocol envelope", async (t) => {
@@ -135,4 +138,29 @@ test("Keelson down, not set up, or not in this repository: Claude carries on and
   assert.match(unconfigured.hookSpecificOutput.additionalContext, /not connected for this user/);
   assert.equal(await hook("pre-edit", { ...input, cwd: plain, tool_input: { ...input.tool_input, file_path: join(plain, "cart.js") } }, config(plain), api.fetchImpl), null);
   assert.equal(api.seen.length, 1);
+});
+
+test("a fork, or a branch made before .keelson was committed, joins the project through a matching remote", async (t) => {
+  const dir = repo({ keelson: null });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  execFileSync("git", ["remote", "set-url", "origin", "https://github.com/lee/api.git"], { cwd: dir });   // lee's fork
+  execFileSync("git", ["remote", "add", "upstream", "git@github.com:Acme/API.git"], { cwd: dir });       // the team's, other case
+  const api = server(() => ({ decision: "allow", reason: "Clear." }), [{ id: PROJECT, name: "shop", repos: ["acme/api"] }]);
+  const edit = { session_id: "f1", cwd: dir, tool_name: "Edit", tool_use_id: "t1", tool_input: { file_path: join(dir, "cart.js"), old_string: "return 1", new_string: "return 2" } };
+  await hook("pre-edit", edit, config(dir), api.fetchImpl);
+  const [sent] = api.seen.at(-1).events;
+  assert.deepEqual([sent.project, sent.repo, sent.data.functions], [PROJECT, "Acme/API", ["count"]]);   // the server matches the case
+  const outside = server(() => ({}), [{ id: PROJECT, name: "shop", repos: ["acme/web"] }]);
+  assert.equal(await hook("pre-edit", { ...edit, session_id: "f2" }, config(join(dir, "other")), outside.fetchImpl), null);
+  assert.equal(outside.seen.length, 0);                                                                // not in a project: nothing sent
+});
+
+test("a .keelson file that names its repository wins over the remotes", async (t) => {
+  const dir = repo({ keelson: { project: PROJECT, repo: "acme/api", version: 1 } });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  execFileSync("git", ["remote", "set-url", "origin", "https://github.com/lee/old-name.git"], { cwd: dir });
+  const api = server(() => ({ decision: "allow", reason: "Clear." }));
+  await hook("pre-edit", { session_id: "k1", cwd: dir, tool_name: "Edit", tool_use_id: "t1",
+                           tool_input: { file_path: join(dir, "cart.js"), old_string: "return 1", new_string: "return 2" } }, config(dir), api.fetchImpl);
+  assert.equal(api.seen.at(-1).events[0].repo, "acme/api");
 });

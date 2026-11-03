@@ -19,9 +19,9 @@ import { chmodSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSyn
 import { homedir, hostname } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { envelope, send, settings } from "./lib/client.mjs";
+import { envelope, projectsList, send, settings } from "./lib/client.mjs";
 import { writtenFunctions } from "./lib/outline.mjs";
-import { describe, findProject, git, headStamp } from "./lib/repo.mjs";
+import { describe, findProject, git, gitRoot, headStamp, remoteRepos } from "./lib/repo.mjs";
 
 const HEARTBEAT_MS = 120_000;
 const GIT_CHECK_MS = 3_000;
@@ -161,10 +161,25 @@ export function install(argv) {
 
 // ---- the watcher ---------------------------------------------------------------------------------------------
 
+// The folder's Keelson project and GitHub repository: the .keelson file's, else a remote of the clone that is in one of
+// the key's projects (a fork's upstream, a renamed repository, a branch made before .keelson was committed).
+export async function locateFolder(folder, config) {
+  const file = findProject(folder);
+  if (file?.repo) return file;
+  const root = file?.root || gitRoot(folder);
+  if (!root) return null;
+  const remotes = remoteRepos(root);
+  const projects = config.apiKey ? await projectsList(config) : null;
+  const lower = (s) => s.toLowerCase();
+  const match = (projects || []).flatMap((p) => remotes.filter((r) => p.repos.some((x) => lower(x) === lower(r))).map((r) => ({ p, r })))
+    .find(({ p }) => !file || p.id === file.project);
+  if (file) return { ...file, repo: match?.r || remotes[0] || null };
+  return match ? { root, project: match.p.id, repo: match.r, edits: "warn", summary: false } : null;
+}
+
 export class Watcher {
-  constructor(folder, { agent = "Keelson Watch", sync = false, config = settings(process.env, "other"), out = say } = {}) {
-    const project = findProject(folder);
-    if (!project) throw new Error(`no .keelson file in ${folder} or above: run keelson-watch inside a repository that has one`);
+  constructor(folder, { agent = "Keelson Watch", sync = false, config = settings(process.env, "other"), out = say, project = findProject(folder) } = {}) {
+    if (!project) throw new Error(`${folder} is not in a Keelson project: commit the project's .keelson file, or add this repository to a project on the dashboard`);
     this.project = project;
     this.sync = sync;
     this.out = out;
@@ -178,7 +193,7 @@ export class Watcher {
   }
 
   where() {
-    const found = describe(this.project.root);
+    const found = describe(this.project.root, this.project.repo);
     this.ctx = { ...this.project, repo: found.repo, branch: found.branch, base: found.base, main: found.main, session: this.session, vendor: "other",
                  developer: (this.config.developer || git(this.project.root, "config", "user.name") || "").slice(0, 80) || null };
     this.stamp = headStamp(this.project.root);
@@ -349,9 +364,9 @@ export class Watcher {
 
 export async function status(argv, { config = settings(process.env, "other"), print = (line) => process.stdout.write(`${line}\n`) } = {}) {
   const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
-  const project = findProject(folder);
-  if (!project) throw new Error(`no .keelson file in ${folder} or above`);
   if (!config.apiKey) throw new Error("not logged in: run keelson-watch login --key kel_live_...");
+  const project = await locateFolder(folder, config);
+  if (!project) throw new Error(`${folder} is not in a Keelson project you can see`);
   const response = await fetch(`${config.url}/v1/protocol/projects/${project.project}/live`, { headers: { authorization: `Bearer ${config.apiKey}` } });
   if (response.status === 503) return print("The live view needs Keelson's project coordinators, which are not running for this project.");
   if (!response.ok) throw new Error(`Keelson answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
@@ -419,7 +434,9 @@ export async function cli(argv = process.argv.slice(2)) {
   if (argv[0] === "stop") return stop(argv.slice(1));
   const folder = argv[0] && !argv[0].startsWith("--") ? argv[0] : process.cwd();
   const out = argv.includes("--quiet") ? say : sayAndNotify;
-  await new Watcher(folder, { agent: arg(argv, "--agent") || "Keelson Watch", sync: argv.includes("--sync"), out }).run();
+  const config = settings(process.env, "other");
+  await new Watcher(folder, { agent: arg(argv, "--agent") || "Keelson Watch", sync: argv.includes("--sync"), out, config,
+                              project: await locateFolder(folder, config) }).run();
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

@@ -112,6 +112,40 @@ function keep(config, events) {
   }
 }
 
+// The projects this key can report to, with their repositories: downloaded and kept for an hour, so an adapter can
+// find a repository's project on this machine (no .keelson file yet, a fork, an old name) without sending any
+// repository name to Keelson. Null when Keelson cannot be reached and nothing is kept.
+const PROJECTS_TTL_MS = 60 * 60 * 1000;
+
+export async function projectsList(config, { fetchImpl = globalThis.fetch, timeoutMs = 1500, now = Date.now() } = {}) {
+  if (!config.apiKey) return null;
+  const file = config.dataDir ? join(config.dataDir, "projects.json") : null;     // no data folder: ask every time
+  let kept = null;
+  try {
+    kept = file ? JSON.parse(readFileSync(file, "utf8")) : null;
+  } catch {
+    kept = null;
+  }
+  if (kept && kept.url === config.url && now - kept.at < PROJECTS_TTL_MS) return kept.projects;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(`${config.url}/v1/protocol/projects`, { headers: { authorization: `Bearer ${config.apiKey}` }, signal: controller.signal });
+    if (!response.ok) return kept ? kept.projects : null;
+    const projects = await response.json();
+    if (!Array.isArray(projects)) return kept ? kept.projects : null;
+    if (file) {
+      mkdirSync(config.dataDir, { recursive: true });
+      writeFileSync(file, JSON.stringify({ url: config.url, at: now, projects }));
+    }
+    return projects;
+  } catch {
+    return kept ? kept.projects : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Sends `events` (queued ones first); returns the answers to `events`, or null if Keelson did not answer in time.
 // `queueOnFailure`: background events are kept for later; decisions are not (they are stale by then).
 export async function send(config, events, { timeoutMs = 300, queueOnFailure = false, fetchImpl = globalThis.fetch } = {}) {

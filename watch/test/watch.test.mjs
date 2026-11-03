@@ -103,8 +103,9 @@ test("notifications use each platform's own tool and carry the text outside the 
 test("status prints who is working in the project and on what", async () => {
   const { dir } = repo();
   const server = createServer((req, res) => {
-    assert.equal(req.url, `/v1/protocol/projects/${PROJECT}/live`);
     res.setHeader("content-type", "application/json");
+    if (req.url === "/v1/protocol/projects") return res.end(JSON.stringify([{ id: PROJECT, name: "shop", repos: ["acme/api"] }]));
+    assert.equal(req.url, `/v1/protocol/projects/${PROJECT}/live`);
     res.end(JSON.stringify({ repos: { "acme/api": { agents: 1, claims: 1, waiting: 0, shown: [
       { agent: "Claude Code", owner: "sam", branch: "sam/discount", editing: ["`applyDiscount` in `cart.js`"], waiting_for: null }] } } }));
   });

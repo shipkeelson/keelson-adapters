@@ -23,7 +23,8 @@ export function findProject(cwd) {
       try {
         const config = JSON.parse(readFileSync(file, "utf8"));
         if (typeof config.project === "string" && PROJECT.test(config.project)) {
-          return { root: dir, project: config.project, edits: config.edits === "block" ? "block" : "warn", summary: config.task_text === "summary" };
+          const repo = typeof config.repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(config.repo) ? config.repo : null;
+          return { root: dir, project: config.project, repo, edits: config.edits === "block" ? "block" : "warn", summary: config.task_text === "summary" };
         }
       } catch {
         // an unreadable file is the same as none: Keelson stays out of the way
@@ -36,14 +37,28 @@ export function findProject(cwd) {
   }
 }
 
-// owner/name from a GitHub remote URL (https or ssh), else null.
+// owner/name from a GitHub remote URL (https, ssh or ssh://, with or without credentials or .git), else null.
 export function repoName(url) {
-  const match = /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(url || "");
+  const match = /github\.com(?::\d+)?[:/]+([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(url || "");
   return match ? `${match[1]}/${match[2]}` : null;
 }
 
-export function describe(root) {
-  const repo = repoName(git(root, "remote", "get-url", "origin"));
+// The GitHub repositories this clone's remotes point at: origin first, then upstream, then the rest. A fork's origin
+// is the developer's copy; upstream (or another remote) is usually the team's.
+export function remoteRepos(root) {
+  const names = (git(root, "remote") || "").split(/\s+/).filter(Boolean);
+  const order = [...names.filter((n) => n === "origin"), ...names.filter((n) => n === "upstream"), ...names.filter((n) => n !== "origin" && n !== "upstream")];
+  return [...new Set(order.map((n) => repoName(git(root, "remote", "get-url", n))).filter(Boolean))];
+}
+
+export function gitRoot(cwd) {
+  return git(resolve(cwd || "."), "rev-parse", "--show-toplevel") || null;
+}
+
+// The repository, branch and base of the clone at `root`. `repo` chooses the GitHub repository when the caller already
+// knows it (the .keelson file names it, or a remote matched a project); else origin's.
+export function describe(root, repo = null) {
+  repo = repo || repoName(git(root, "remote", "get-url", "origin"));
   const branch = git(root, "rev-parse", "--abbrev-ref", "HEAD");
   const head = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") || "origin/main";
   const base = git(root, "merge-base", "HEAD", head) || null;

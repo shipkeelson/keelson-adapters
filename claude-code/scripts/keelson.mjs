@@ -15,8 +15,8 @@
 // is "carry on".
 
 import { readFileSync } from "node:fs";
-import { describe, findProject, git, headStamp } from "./lib/repo.mjs";
-import { envelope, forget, recall, remember, send, settings, stash, unstash } from "./lib/client.mjs";
+import { describe, findProject, git, gitRoot, headStamp, remoteRepos } from "./lib/repo.mjs";
+import { envelope, forget, projectsList, recall, remember, send, settings, stash, unstash } from "./lib/client.mjs";
 import { VENDORS, allowOut, commandOf, contextOut, cwdOf, denyOut, doneEdits, plannedEdits, sessionOf, vendorOf } from "./lib/vendors.mjs";
 
 const EDIT_LIMIT_MS = Number(process.env.KEELSON_EDIT_TIMEOUT_MS) || 300;   // design: past 300 ms the agent proceeds
@@ -37,17 +37,40 @@ function emit(output) {
   if (output) process.stdout.write(JSON.stringify(output));
 }
 
+// Which Keelson project and GitHub repository this folder is: the .keelson file's (with its `repo` when it names one),
+// else a remote of this clone that is in one of the key's projects (a fork's upstream, a renamed repository, a branch
+// made before .keelson was committed). Kept per session, so an edit check asks nothing.
+async function locate(input, config) {
+  const session = sessionOf(input);
+  const file = findProject(cwdOf(input));                // read every time: cheap, and settings in it take effect at once
+  if (file?.repo) return file;
+  const kept = recall(config, session, "located");
+  let found = kept && kept.cwd === cwdOf(input) && kept.file === (file?.project ?? null) ? kept : null;
+  if (!found) {
+    const root = file?.root || gitRoot(cwdOf(input));
+    const remotes = root ? remoteRepos(root) : [];
+    const projects = root && config.apiKey ? await projectsList(config) : null;
+    const lower = (s) => s.toLowerCase();
+    const match = (projects || []).flatMap((p) => remotes.filter((r) => p.repos.some((x) => lower(x) === lower(r))).map((r) => ({ p, r })))
+      .find(({ p }) => !file || p.id === file.project);
+    found = { cwd: cwdOf(input), file: file?.project ?? null, root, id: match?.p.id ?? null, repo: match?.r ?? remotes[0] ?? null };
+    remember(config, session, "located", found);
+  }
+  if (file) return { ...file, repo: found.repo };
+  return found.id ? { root: found.root, project: found.id, repo: found.repo, edits: "warn", summary: false } : null;
+}
+
 // The project, repository, branch and base for this hook. Git is asked once per session and again only when HEAD
 // moves, so an edit check costs no git process in the common case.
-function contextFor(input, config) {
+async function contextFor(input, config) {
   const session = sessionOf(input);
-  const project = findProject(cwdOf(input));
+  const project = await locate(input, config);
   if (!project) return null;
   const stamp = headStamp(project.root);
   const cached = stamp && recall(config, session, "where");
   let where = cached && cached.stamp === stamp && cached.root === project.root ? cached : null;
   if (!where) {
-    where = { ...describe(project.root), developer: config.developer || git(project.root, "config", "user.name") || null, stamp, root: project.root };
+    where = { ...describe(project.root, project.repo), developer: config.developer || git(project.root, "config", "user.name") || null, stamp, root: project.root };
     if (stamp && where.repo && where.branch) remember(config, session, "where", where);
   }
   if (!where.repo || !where.branch) return null;
@@ -97,7 +120,8 @@ function editData(config, session, edit, extra = {}) {
 }
 
 async function sessionStart(input, config) {
-  const project = findProject(cwdOf(input));
+  forget(config, sessionOf(input));                 // a new or resumed session looks its project up again
+  const project = config.apiKey ? await locate(input, config) : findProject(cwdOf(input));
   if (!project) return;
   if (!config.apiKey) {
     const how = config.vendor === "claude_code" ? "set the Keelson plugin's API key (run /plugin, choose keelson, then configure)"
@@ -106,7 +130,7 @@ async function sessionStart(input, config) {
       `${how}. Until then, other agents cannot see this session.`));
     return;
   }
-  const ctx = contextFor(input, config);
+  const ctx = await contextFor(input, config);
   if (!ctx) return;
   const [answer] = (await send(config, [envelope("session.start", ctx, { source: input.source || "startup" },
     { capabilities: { can_block: project.edits === "block", can_sync: false, can_receive: false } })], { timeoutMs: START_LIMIT_MS, queueOnFailure: true })) || [];
@@ -123,7 +147,7 @@ async function sessionStart(input, config) {
 async function prompt(input, config) {
   const text = String(input.prompt || "").trim();
   if (text.length < MIN_TASK_CHARS || text.startsWith("/")) return;
-  const ctx = contextFor(input, config);
+  const ctx = await contextFor(input, config);
   if (!ctx || !config.apiKey) return;
   const data = { text: ctx.summary ? text.split("\n")[0].slice(0, 200) : text.slice(0, 8000) };
   const [answer] = (await send(config, [envelope("task.declare", ctx, data)], { timeoutMs: TASK_LIMIT_MS })) || [];
@@ -141,7 +165,7 @@ async function prompt(input, config) {
 }
 
 async function preEdit(input, config) {
-  const ctx = contextFor(input, config);
+  const ctx = await contextFor(input, config);
   if (!ctx || !config.apiKey) return emit(allowOut(config.vendor));
   const edits = plannedEdits(config.vendor, input, ctx.root).filter((e) => !e.unchanged && !e.unknown);
   if (!edits.length) return emit(allowOut(config.vendor));
@@ -170,7 +194,7 @@ async function preEdit(input, config) {
 }
 
 async function postEdit(input, config) {
-  const ctx = contextFor(input, config);
+  const ctx = await contextFor(input, config);
   if (!ctx || !config.apiKey) return;
   const done = doneEdits(config.vendor, input, ctx.root);
   const edits = (done || unstash(config, ctx.session, input.tool_use_id || "last") || plannedEdits(config.vendor, input, ctx.root))
@@ -195,7 +219,7 @@ async function postEdit(input, config) {
 }
 
 async function postTool(input, config) {
-  const ctx = contextFor(input, config);
+  const ctx = await contextFor(input, config);
   if (!ctx) return;
   const told = messages(config, ctx.session);
   if (told.length) emit(contextOut(config.vendor, "post", told.join("\n")));
@@ -205,7 +229,7 @@ async function postBash(input, config) {
   const command = commandOf(input);
   const kind = /\bgit\s+push\b/.test(command) ? "git.push" : /\bgit\s+commit\b/.test(command) ? "git.commit" : null;
   if (!kind) return;
-  const ctx = contextFor(input, config);
+  const ctx = await contextFor(input, config);
   if (!ctx || !config.apiKey) return;
   const head = git(ctx.root, "rev-parse", "HEAD");
   const [answer] = (await send(config, [envelope(kind, ctx, { head })], { timeoutMs: 3000, queueOnFailure: true })) || [];
@@ -220,7 +244,7 @@ async function postBash(input, config) {
 }
 
 async function sessionEnd(input, config) {
-  const ctx = contextFor(input, config);
+  const ctx = await contextFor(input, config);
   if (ctx && config.apiKey) await send(config, [envelope("session.end", ctx, { reason: input.reason || "other" })], { timeoutMs: 2500, queueOnFailure: true });
   forget(config, sessionOf(input));
 }
